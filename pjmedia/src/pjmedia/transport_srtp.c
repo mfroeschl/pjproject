@@ -123,6 +123,9 @@
 /* Maximum number of SRTP keying method */
 #define MAX_KEYING		    2
 
+// define this to debug the SRTP restart logic
+#define DEBUG_SRTP_RESTART 1
+
 static const pj_str_t ID_RTP_AVP  = { "RTP/AVP", 7 };
 static const pj_str_t ID_RTP_SAVP = { "RTP/SAVP", 8 };
 // static const pj_str_t ID_INACTIVE = { "inactive", 8 };
@@ -307,6 +310,10 @@ typedef struct transport_srtp
      */
     pj_uint32_t		 rx_ssrc;
 
+#if defined(DEBUG_SRTP_RESTART) && DEBUG_SRTP_RESTART != 0
+    pj_thread_t* thread;
+    pj_bool_t    thread_quit_flag;
+#endif  // DEBUG_SRTP_RESTART
 } transport_srtp;
 
 
@@ -676,6 +683,61 @@ PJ_DEF(pj_status_t) pjmedia_srtp_enum_keying(unsigned *count,
     return PJ_SUCCESS;
 }
 
+#if defined(DEBUG_SRTP_RESTART) && DEBUG_SRTP_RESTART != 0
+#define SRTP_RESTART_THREAD_SLEEP_INTERVAL 10
+#define SRTP_RESTART_THREAD_RESTART_INTERVAL (30 * 60 * 1000)  // 30 minutes (it actually takes a bit longer because of the way the logic is set up without using time stamps)
+#define SRTP_RESTART_THREAD_LOG_INTERVAL 1000  // 1 second
+
+static int PJ_THREAD_FUNC srtp_restart_thread(void* arg) {
+  uint32_t elapsed_time = 0;
+  uint32_t restart_count = 0;
+  transport_srtp* srtp = (transport_srtp*)arg;
+
+  if (!srtp) {
+    PJ_LOG(1, (THIS_FILE, "[SRTP_RESTART] srtp_restart_thread() No SRTP transport!"));
+    return PJ_SUCCESS;
+  }
+
+  PJ_LOG(5, (srtp->pool->obj_name, "[SRTP_RESTART] srtp_restart_thread() Entering SRTP restart thread..."));
+
+  while (!srtp->thread_quit_flag) {
+    if (elapsed_time > 0) {
+      if (elapsed_time % SRTP_RESTART_THREAD_LOG_INTERVAL == 0) {
+        PJ_LOG(3, (srtp->pool->obj_name, "[SRTP_RESTART] srtp_restart_thread() elapsed_time = %u (interval = %u)", elapsed_time, SRTP_RESTART_THREAD_RESTART_INTERVAL));
+      }
+
+      if (elapsed_time % SRTP_RESTART_THREAD_RESTART_INTERVAL == 0) {
+        if (srtp->session_inited) {
+          pjmedia_srtp_crypto tx, rx;
+          pj_status_t status = PJ_SUCCESS;
+          uint32_t roc = 0;
+
+          restart_count++;
+          status = srtp_get_stream_roc(srtp->srtp_rx_ctx, srtp->rx_ssrc, &roc);
+          if (status != PJ_SUCCESS) {
+            PJ_LOG(2, (THIS_FILE, "[SRTP_RESTART] srtp_restart_thread() Failed to retrieve stream ROC: %d", status));
+          }
+
+          tx = srtp->tx_policy;
+          rx = srtp->rx_policy;
+
+          PJ_LOG(3, (srtp->pool->obj_name, "[SRTP_RESTART] srtp_restart_thread() Restarting SRTP session... restart_count = %u, rx_ssrc = %u rx_roc = %u", restart_count, srtp->rx_ssrc, roc));
+          status = pjmedia_transport_srtp_start((pjmedia_transport*)srtp, &tx, &rx);
+          if (status != PJ_SUCCESS) {
+            PJ_LOG(1, (THIS_FILE, "[SRTP_RESTART] srtp_restart_thread() Failed to restart SRTP session: %d", status));
+          }
+        }
+      }
+    }
+
+    pj_thread_sleep(SRTP_RESTART_THREAD_SLEEP_INTERVAL);
+    elapsed_time += SRTP_RESTART_THREAD_SLEEP_INTERVAL;
+  }
+
+  PJ_LOG(5, (srtp->pool->obj_name, "[SRTP_RESTART] srtp_restart_thread() Leaving SRTP restart thread... elapsed_time = %u s", elapsed_time / 1000));
+  return PJ_SUCCESS;
+}
+#endif  // DEBUG_SRTP_RESTART
 
 /*
  * Create an SRTP media transport.
@@ -806,6 +868,15 @@ PJ_DEF(pj_status_t) pjmedia_transport_srtp_create(
 
     /* Done */
     *p_tp = &srtp->base;
+
+#if defined(DEBUG_SRTP_RESTART) && DEBUG_SRTP_RESTART != 0
+    PJ_LOG(5, (srtp->pool->obj_name, "[SRTP_RESTART] transport_srtp_create() Creating srtp_restart_thread..."));
+    srtp->thread_quit_flag = PJ_FALSE;
+    status = pj_thread_create(pool, srtp->base.name, &srtp_restart_thread, srtp, 0, 0, &srtp->thread);
+    if (status != PJ_SUCCESS) {
+      PJ_LOG(1, (srtp->pool->obj_name, "[SRTP_RESTART] transport_srtp_create() Could not create srtp_restart_thread."));
+    }
+#endif
 
     return PJ_SUCCESS;
 }
@@ -1296,6 +1367,17 @@ static pj_status_t transport_destroy  (pjmedia_transport *tp)
     unsigned i;
 
     PJ_ASSERT_RETURN(tp, PJ_EINVAL);
+
+#if defined(DEBUG_SRTP_RESTART) && DEBUG_SRTP_RESTART != 0
+    if (srtp->thread) {
+      PJ_LOG(5, (srtp->pool->obj_name, "[SRTP_RESTART] transport_destroy() Destroying srtp_restart_thread..."));
+      srtp->thread_quit_flag = PJ_TRUE;
+      pj_thread_join(srtp->thread);
+      pj_thread_destroy(srtp->thread);
+      srtp->thread = NULL;
+      PJ_LOG(5, (srtp->pool->obj_name, "[SRTP_RESTART] transport_destroy() Destroyed srtp_restart_thread."));
+    }
+#endif
 
     /* Close all keying. Note that any keying should not be destroyed before
      * SRTP transport is destroyed as re-INVITE may initiate new keying method
