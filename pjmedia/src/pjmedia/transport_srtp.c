@@ -684,13 +684,21 @@ PJ_DEF(pj_status_t) pjmedia_srtp_enum_keying(unsigned *count,
 }
 
 #if defined(DEBUG_SRTP_RESTART) && DEBUG_SRTP_RESTART != 0
-#define SRTP_RESTART_THREAD_SLEEP_INTERVAL 10
-#define SRTP_RESTART_THREAD_RESTART_INTERVAL (30 * 60 * 1000)  // 30 minutes (it actually takes a bit longer because of the way the logic is set up without using time stamps)
-#define SRTP_RESTART_THREAD_LOG_INTERVAL 1000  // 1 second
+#define SRTP_RESTART_THREAD_SLEEP_INTERVAL 100
+#define SRTP_RESTART_THREAD_RESTART_INTERVAL 3000  // restart every 3 seconds
+#define SRTP_RESTART_THREAD_LOG_INTERVAL 1000  // log every 1 second
+#define SRTP_RESTART_ENABLE_RESTART_ON_FIX_INTERVAL PJ_FALSE  // enable to restart SRTP at a fix interval
+#define SRTP_RESTART_ENABLE_RESTART_ON_RX_ROC_CHANGE PJ_TRUE  // enable to restart SRTP when RX ROC changes
 
 static int PJ_THREAD_FUNC srtp_restart_thread(void* arg) {
   uint32_t elapsed_time = 0;
   uint32_t restart_count = 0;
+  uint32_t last_rx_roc = 0;
+  uint32_t current_rx_roc = 0;
+  pj_bool_t restart_on_fix_interval = SRTP_RESTART_ENABLE_RESTART_ON_FIX_INTERVAL;
+  pj_bool_t restart_on_rx_roc_change = SRTP_RESTART_ENABLE_RESTART_ON_RX_ROC_CHANGE;
+  pj_bool_t restart = PJ_FALSE;
+  pj_status_t status = PJ_SUCCESS;
   transport_srtp* srtp = (transport_srtp*)arg;
 
   if (!srtp) {
@@ -701,37 +709,45 @@ static int PJ_THREAD_FUNC srtp_restart_thread(void* arg) {
   PJ_LOG(5, (srtp->pool->obj_name, "[SRTP_RESTART] srtp_restart_thread() Entering SRTP restart thread..."));
 
   while (!srtp->thread_quit_flag) {
-    if (elapsed_time > 0) {
+    pj_thread_sleep(SRTP_RESTART_THREAD_SLEEP_INTERVAL);
+    elapsed_time += SRTP_RESTART_THREAD_SLEEP_INTERVAL;
+
+    if (srtp->session_inited && elapsed_time > 0) {
       if (elapsed_time % SRTP_RESTART_THREAD_LOG_INTERVAL == 0) {
         PJ_LOG(3, (srtp->pool->obj_name, "[SRTP_RESTART] srtp_restart_thread() elapsed_time = %u (interval = %u)", elapsed_time, SRTP_RESTART_THREAD_RESTART_INTERVAL));
       }
 
-      if (elapsed_time % SRTP_RESTART_THREAD_RESTART_INTERVAL == 0) {
-        if (srtp->session_inited) {
-          pjmedia_srtp_crypto tx, rx;
-          pj_status_t status = PJ_SUCCESS;
-          uint32_t roc = 0;
+      status = srtp_get_stream_roc(srtp->srtp_rx_ctx, srtp->rx_ssrc, &current_rx_roc);
+      if (status != PJ_SUCCESS) {
+        PJ_LOG(2, (THIS_FILE, "[SRTP_RESTART] srtp_restart_thread() Failed to retrieve RX ROC: %d", status));
+        continue;
+      }
 
-          restart_count++;
-          status = srtp_get_stream_roc(srtp->srtp_rx_ctx, srtp->rx_ssrc, &roc);
-          if (status != PJ_SUCCESS) {
-            PJ_LOG(2, (THIS_FILE, "[SRTP_RESTART] srtp_restart_thread() Failed to retrieve stream ROC: %d", status));
-          }
+      if (restart_on_fix_interval && elapsed_time % SRTP_RESTART_THREAD_RESTART_INTERVAL == 0) {
+        restart = PJ_TRUE;
+        PJ_LOG(3, (srtp->pool->obj_name, "[SRTP_RESTART] srtp_restart_thread() Will restart SRTP session (fix timer)..."));
+      }
+      else if (restart_on_rx_roc_change && current_rx_roc != last_rx_roc) {
+        restart = PJ_TRUE;
+        PJ_LOG(3, (srtp->pool->obj_name, "[SRTP_RESTART] srtp_restart_thread() Will restart SRTP session (RX ROC changed from %u to %u)...", last_rx_roc, current_rx_roc));
+        last_rx_roc = current_rx_roc;
+      }
+      else {
+        restart = PJ_FALSE;
+      }
 
-          tx = srtp->tx_policy;
-          rx = srtp->rx_policy;
-
-          PJ_LOG(3, (srtp->pool->obj_name, "[SRTP_RESTART] srtp_restart_thread() Restarting SRTP session... restart_count = %u, rx_ssrc = %u rx_roc = %u", restart_count, srtp->rx_ssrc, roc));
-          status = pjmedia_transport_srtp_start((pjmedia_transport*)srtp, &tx, &rx);
-          if (status != PJ_SUCCESS) {
-            PJ_LOG(1, (THIS_FILE, "[SRTP_RESTART] srtp_restart_thread() Failed to restart SRTP session: %d", status));
-          }
+      if (restart) {
+        pjmedia_srtp_crypto tx, rx;
+        tx = srtp->tx_policy;
+        rx = srtp->rx_policy;
+        restart_count++;
+        PJ_LOG(3, (srtp->pool->obj_name, "[SRTP_RESTART] srtp_restart_thread() Restarting SRTP session... restart_count = %u, rx_ssrc = %u", restart_count, srtp->rx_ssrc));
+        status = pjmedia_transport_srtp_start((pjmedia_transport*)srtp, &tx, &rx);
+        if (status != PJ_SUCCESS) {
+          PJ_LOG(1, (THIS_FILE, "[SRTP_RESTART] srtp_restart_thread() Failed to restart SRTP session: %d", status));
         }
       }
     }
-
-    pj_thread_sleep(SRTP_RESTART_THREAD_SLEEP_INTERVAL);
-    elapsed_time += SRTP_RESTART_THREAD_SLEEP_INTERVAL;
   }
 
   PJ_LOG(5, (srtp->pool->obj_name, "[SRTP_RESTART] srtp_restart_thread() Leaving SRTP restart thread... elapsed_time = %u s", elapsed_time / 1000));
