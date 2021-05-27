@@ -310,6 +310,11 @@ typedef struct transport_srtp
      */
     pj_uint32_t		 rx_ssrc;
 
+    /* RTP SSRC in sending direction, used in getting and setting SRTP
+     * roll over counter (ROC) on SRTP restart.
+     */
+    pj_uint32_t		 tx_ssrc;
+
 #if defined(DEBUG_SRTP_RESTART) && DEBUG_SRTP_RESTART != 0
     pj_thread_t* thread;
     pj_bool_t    thread_quit_flag;
@@ -910,6 +915,7 @@ PJ_DEF(pj_status_t) pjmedia_transport_srtp_start(
     srtp_policy_t    tx_;
     srtp_policy_t    rx_;
     uint32_t	     rx_roc = 0;
+    uint32_t	     tx_roc = 0;
     srtp_err_status_t err;
     int		     cr_tx_idx = 0;
     int		     au_tx_idx = 0;
@@ -922,7 +928,20 @@ PJ_DEF(pj_status_t) pjmedia_transport_srtp_start(
     pj_lock_acquire(srtp->mutex);
 
     if (srtp->session_inited) {
-	srtp_get_stream_roc(srtp->srtp_rx_ctx, srtp->rx_ssrc, &rx_roc);
+	err = srtp_get_stream_roc(srtp->srtp_rx_ctx, srtp->rx_ssrc, &rx_roc);
+	if (err != srtp_err_status_ok) {
+	    PJ_PERROR(3,(srtp->pool->obj_name,
+			 PJMEDIA_ERRNO_FROM_LIBSRTP(err),
+		         "Warning: SRTP restart failed to get RX ROC, "
+		         "we may fail in decrypting remote RTP packets"));
+	}
+	err = srtp_get_stream_roc(srtp->srtp_tx_ctx, srtp->tx_ssrc, &tx_roc);
+	if (err != srtp_err_status_ok) {
+	    PJ_PERROR(3,(srtp->pool->obj_name,
+			 PJMEDIA_ERRNO_FROM_LIBSRTP(err),
+		         "Warning: SRTP restart failed to get TX ROC, "
+		         "remote may fail in decrypting our RTP packets"));
+	}
 	pjmedia_transport_srtp_stop(tp);
     }
 
@@ -973,8 +992,13 @@ PJ_DEF(pj_status_t) pjmedia_transport_srtp_start(
     else
 	tx_.rtp.sec_serv    = sec_serv_none;
     tx_.key		    = (uint8_t*)srtp->tx_key;
-    tx_.ssrc.type	    = ssrc_any_outbound;
-    tx_.ssrc.value	    = 0;
+    if (tx_roc != 0 && srtp->tx_ssrc != 0) {
+	tx_.ssrc.type	    = ssrc_specific;
+	tx_.ssrc.value	    = srtp->tx_ssrc;
+    } else {
+	tx_.ssrc.type	    = ssrc_any_outbound;
+	tx_.ssrc.value	    = 0;
+    }
     tx_.rtp.cipher_type	    = crypto_suites[cr_tx_idx].cipher_type;
     tx_.rtp.cipher_key_len  = crypto_suites[cr_tx_idx].cipher_key_len;
     tx_.rtp.auth_type	    = crypto_suites[au_tx_idx].auth_type;
@@ -987,6 +1011,19 @@ PJ_DEF(pj_status_t) pjmedia_transport_srtp_start(
     if (err != srtp_err_status_ok) {
 	status = PJMEDIA_ERRNO_FROM_LIBSRTP(err);
 	goto on_return;
+    }
+    if (tx_roc != 0 && srtp->tx_ssrc != 0) {
+	err = srtp_set_stream_roc(srtp->srtp_tx_ctx, srtp->tx_ssrc, tx_roc);
+	if (err != srtp_err_status_ok) {
+	    PJ_PERROR(3,(srtp->pool->obj_name,
+			 PJMEDIA_ERRNO_FROM_LIBSRTP(err),
+		         "Warning: SRTP restart failed to set TX ROC, "
+		         "remote may fail in decrypting our RTP packets"));
+	} else {
+	    PJ_LOG(4,(srtp->pool->obj_name,
+		      "SRTP restart set TX ROC=%d SSRC=%d",
+		      tx_roc, srtp->tx_ssrc));
+	}
     }
     srtp->tx_policy = *tx;
     pj_strset(&srtp->tx_policy.key,  srtp->tx_key, tx->key.slen);
@@ -1028,7 +1065,17 @@ PJ_DEF(pj_status_t) pjmedia_transport_srtp_start(
 	goto on_return;
     }
     if (rx_roc != 0 && srtp->rx_ssrc != 0) {
-	srtp_set_stream_roc(srtp->srtp_rx_ctx, srtp->rx_ssrc, rx_roc);
+	err = srtp_set_stream_roc(srtp->srtp_rx_ctx, srtp->rx_ssrc, rx_roc);
+	if (err != srtp_err_status_ok) {
+	    PJ_PERROR(3,(srtp->pool->obj_name,
+			 PJMEDIA_ERRNO_FROM_LIBSRTP(err),
+		         "Warning: SRTP restart failed to set RX ROC, "
+		         "we may fail in decrypting remote RTP packets"));
+	} else {
+	    PJ_LOG(4,(srtp->pool->obj_name,
+		      "SRTP restart set RX ROC=%d SSRC=%d",
+		      rx_roc, srtp->rx_ssrc));
+	}
     }
     srtp->rx_policy = *rx;
     pj_strset(&srtp->rx_policy.key,  srtp->rx_key, rx->key.slen);
@@ -1311,6 +1358,9 @@ static pj_status_t transport_send_rtp( pjmedia_transport *tp,
     if (err == srtp_err_status_ok) {
 	status = pjmedia_transport_send_rtp(srtp->member_tp,
 					    srtp->rtp_tx_buffer, len);
+
+	/* Save SSRC after successful SRTP protect */
+	srtp->tx_ssrc = ntohl(((pjmedia_rtp_hdr*)pkt)->ssrc);
     } else {
 	status = PJMEDIA_ERRNO_FROM_LIBSRTP(err);
     }
