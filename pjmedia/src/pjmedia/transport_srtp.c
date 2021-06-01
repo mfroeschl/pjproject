@@ -928,6 +928,7 @@ PJ_DEF(pj_status_t) pjmedia_transport_srtp_start(
     pj_lock_acquire(srtp->mutex);
 
     if (srtp->session_inited) {
+	/*
 	err = srtp_get_stream_roc(srtp->srtp_rx_ctx, srtp->rx_ssrc, &rx_roc);
 	if (err != srtp_err_status_ok) {
 	    PJ_PERROR(3,(srtp->pool->obj_name,
@@ -943,6 +944,7 @@ PJ_DEF(pj_status_t) pjmedia_transport_srtp_start(
 		         "remote may fail in decrypting our RTP packets"));
 	}
 	pjmedia_transport_srtp_stop(tp);
+	*/
     }
 
     /* Get encryption and authentication method */
