@@ -1001,9 +1001,12 @@ static pj_status_t  codec_parse( pjmedia_codec *codec,
                 opus_repacketizer_cat(opus_data->dec_packer, tmp_buf,
                                       unpad_len);
                 size = opus_repacketizer_out_range(opus_data->dec_packer,
-                                                   0, 1, opus_data->parse_buf,
+                                                   i, i+1,
+                                                   opus_data->parse_buf +
+                                                   out_pos,
                                                    (opus_int32)
-                                                   opus_data->parse_buf_size);
+                                                   (opus_data->parse_buf_size -
+                                                    out_pos));
             }
         }
         if (size < 0) {
