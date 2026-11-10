@@ -1,5 +1,5 @@
 /* 
- * Copyright (C) 2008-2011 Teluu Inc. (http://www.teluu.com)
+ * Copyright (C) 2008-2026 Teluu Inc. (http://www.teluu.com)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -640,3 +640,127 @@ int codec_test_vectors(void)
     return rc_final;
 }
 
+#if PJMEDIA_HAS_OPUS_CODEC
+/* Opus TOC: config 31 (CELT FB 20 ms), mono */
+#define OPUS_TOC_CODE0  0xF8
+#define OPUS_TOC_CODE3  0xFB
+
+/*
+ * Build a two-frame code 3 VBR packet. With "ext", the padding holds a
+ * frame separator followed by an extension, so the extension belongs to
+ * the second frame.
+ */
+static unsigned opus_build_pkt(pj_uint8_t *pkt, const pj_uint8_t *pl0,
+                               unsigned len0, const pj_uint8_t *pl1,
+                               unsigned len1, pj_bool_t ext)
+{
+    unsigned pos = 0;
+
+    pkt[pos++] = OPUS_TOC_CODE3;
+    pkt[pos++] = (pj_uint8_t)(0x80 | (ext ? 0x40 : 0) | 2);
+    if (ext)
+        pkt[pos++] = 2;
+    pkt[pos++] = (pj_uint8_t)len0;
+    pj_memcpy(pkt + pos, pl0, len0);
+    pos += len0;
+    pj_memcpy(pkt + pos, pl1, len1);
+    pos += len1;
+    if (ext) {
+        pkt[pos++] = 0x02;
+        pkt[pos++] = 0xFC;
+    }
+    return pos;
+}
+
+static int opus_check_parse(pjmedia_codec *codec, unsigned len0,
+                            unsigned len1, pj_bool_t ext)
+{
+    pj_uint8_t pl0[64], pl1[64], pkt[160];
+    const pj_uint8_t *pl[2];
+    unsigned len[2];
+    pjmedia_frame frames[4];
+    unsigned i, pkt_len, frame_cnt = PJ_ARRAY_SIZE(frames);
+    pj_timestamp ts;
+
+    for (i = 0; i < sizeof(pl0); ++i) {
+        pl0[i] = (pj_uint8_t)(0x10 + i);
+        pl1[i] = (pj_uint8_t)(0x80 + i);
+    }
+    pl[0] = pl0;
+    pl[1] = pl1;
+    len[0] = len0;
+    len[1] = len1;
+
+    pkt_len = opus_build_pkt(pkt, pl0, len0, pl1, len1, ext);
+    ts.u64 = 0;
+
+    PJ_TEST_SUCCESS(pjmedia_codec_parse(codec, pkt, pkt_len, &ts,
+                                        &frame_cnt, frames),
+                    ext ? "extension on frame 1" : "no extension",
+                    return -10);
+    PJ_TEST_EQ(frame_cnt, 2, NULL, return -20);
+    PJ_TEST_EQ(frames[0].bit_info, 0, NULL, return -30);
+
+    for (i = 0; i < 2; ++i) {
+        const pj_uint8_t *out = (const pj_uint8_t*)frames[i].buf;
+
+        PJ_TEST_EQ(frames[i].size, 1 + len[i], NULL, return -40);
+        PJ_TEST_EQ(out[0], OPUS_TOC_CODE0, NULL, return -50);
+        PJ_TEST_EQ(pj_memcmp(out + 1, pl[i], len[i]), 0, NULL,
+                   return -60);
+    }
+    return 0;
+}
+
+int codec_opus_parse_test(void)
+{
+    pjmedia_endpt *endpt;
+    pjmedia_codec_mgr *mgr;
+    const pjmedia_codec_info *info;
+    pjmedia_codec_param param;
+    pjmedia_codec *codec = NULL;
+    pj_pool_t *pool = NULL;
+    pj_str_t codec_id = pj_str("opus/48000");
+    unsigned count = 1;
+    int rc = 0;
+
+    PJ_TEST_SUCCESS(pjmedia_endpt_create2(mem, NULL, 0, &endpt), NULL,
+                    return -1);
+    mgr = pjmedia_endpt_get_codec_mgr(endpt);
+
+    PJ_TEST_SUCCESS(pjmedia_codec_opus_init(endpt), NULL,
+                    {rc = -2; goto on_return;});
+    PJ_TEST_SUCCESS(pjmedia_codec_mgr_find_codecs_by_id(mgr, &codec_id,
+                                                        &count, &info,
+                                                        NULL),
+                    NULL, {rc = -3; goto on_return;});
+    PJ_TEST_SUCCESS(pjmedia_codec_mgr_get_default_param(mgr, info, &param),
+                    NULL, {rc = -4; goto on_return;});
+    PJ_TEST_SUCCESS(pjmedia_codec_mgr_alloc_codec(mgr, info, &codec), NULL,
+                    {rc = -5; goto on_return;});
+
+    pool = pj_pool_create(mem, "opusparse", 1000, 1000, NULL);
+    PJ_TEST_NOT_NULL(pool, NULL, {rc = -6; goto on_return;});
+    PJ_TEST_SUCCESS(pjmedia_codec_init(codec, pool), NULL,
+                    {rc = -7; goto on_return;});
+    PJ_TEST_SUCCESS(pjmedia_codec_open(codec, &param), NULL,
+                    {rc = -8; goto on_return;});
+
+    rc = opus_check_parse(codec, 0, 58, PJ_TRUE);
+    if (rc == 0)
+        rc = opus_check_parse(codec, 20, 30, PJ_TRUE);
+    if (rc == 0)
+        rc = opus_check_parse(codec, 20, 30, PJ_FALSE);
+
+    pjmedia_codec_close(codec);
+
+on_return:
+    if (codec)
+        pjmedia_codec_mgr_dealloc_codec(mgr, codec);
+    if (pool)
+        pj_pool_release(pool);
+    pjmedia_codec_opus_deinit();
+    pjmedia_endpt_destroy2(endpt);
+    return rc;
+}
+#endif  /* PJMEDIA_HAS_OPUS_CODEC */
