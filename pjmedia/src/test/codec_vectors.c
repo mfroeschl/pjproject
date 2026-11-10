@@ -645,66 +645,71 @@ int codec_test_vectors(void)
 #define OPUS_TOC_CODE0  0xF8
 #define OPUS_TOC_CODE3  0xFB
 
+#define OPUS_MAX_TEST_FRAMES    3
+
 /*
- * Build a two-frame code 3 VBR packet. With "ext", the padding holds a
- * frame separator followed by an extension, so the extension belongs to
- * the second frame.
+ * Build a code 3 VBR packet of "cnt" frames. With "ext_frame" >= 0, the
+ * padding holds "ext_frame" frame separators followed by an extension, so
+ * the extension belongs to that frame.
  */
-static unsigned opus_build_pkt(pj_uint8_t *pkt, const pj_uint8_t *pl0,
-                               unsigned len0, const pj_uint8_t *pl1,
-                               unsigned len1, pj_bool_t ext)
+static unsigned opus_build_pkt(pj_uint8_t *pkt, const pj_uint8_t *pl[],
+                               const unsigned len[], unsigned cnt,
+                               int ext_frame)
 {
-    unsigned pos = 0;
+    unsigned i, pos = 0;
 
     pkt[pos++] = OPUS_TOC_CODE3;
-    pkt[pos++] = (pj_uint8_t)(0x80 | (ext ? 0x40 : 0) | 2);
-    if (ext)
-        pkt[pos++] = 2;
-    pkt[pos++] = (pj_uint8_t)len0;
-    pj_memcpy(pkt + pos, pl0, len0);
-    pos += len0;
-    pj_memcpy(pkt + pos, pl1, len1);
-    pos += len1;
-    if (ext) {
-        pkt[pos++] = 0x02;
+    pkt[pos++] = (pj_uint8_t)(0x80 | (ext_frame >= 0 ? 0x40 : 0) | cnt);
+    if (ext_frame >= 0)
+        pkt[pos++] = (pj_uint8_t)(ext_frame + 1);
+    for (i = 0; i + 1 < cnt; ++i) {
+        pj_assert(len[i] < 252);
+        pkt[pos++] = (pj_uint8_t)len[i];
+    }
+    for (i = 0; i < cnt; ++i) {
+        pj_memcpy(pkt + pos, pl[i], len[i]);
+        pos += len[i];
+    }
+    if (ext_frame >= 0) {
+        for (i = 0; i < (unsigned)ext_frame; ++i)
+            pkt[pos++] = 0x02;
         pkt[pos++] = 0xFC;
     }
     return pos;
 }
 
-static int opus_check_parse(pjmedia_codec *codec, unsigned len0,
-                            unsigned len1, pj_bool_t ext)
+static int opus_check_parse(pjmedia_codec *codec, unsigned samples_per_frame,
+                            unsigned cnt, const unsigned len[],
+                            int ext_frame)
 {
-    pj_uint8_t pl0[64], pl1[64], pkt[160];
-    const pj_uint8_t *pl[2];
-    unsigned len[2];
+    pj_uint8_t pl_buf[OPUS_MAX_TEST_FRAMES][64], pkt[256];
+    const pj_uint8_t *pl[OPUS_MAX_TEST_FRAMES];
     pjmedia_frame frames[4];
-    unsigned i, pkt_len, frame_cnt = PJ_ARRAY_SIZE(frames);
+    unsigned i, j, pkt_len, frame_cnt = PJ_ARRAY_SIZE(frames);
     pj_timestamp ts;
 
-    for (i = 0; i < sizeof(pl0); ++i) {
-        pl0[i] = (pj_uint8_t)(0x10 + i);
-        pl1[i] = (pj_uint8_t)(0x80 + i);
+    pj_assert(cnt <= OPUS_MAX_TEST_FRAMES);
+    for (i = 0; i < cnt; ++i) {
+        for (j = 0; j < sizeof(pl_buf[i]); ++j)
+            pl_buf[i][j] = (pj_uint8_t)(0x10 + 0x40 * i + j);
+        pl[i] = pl_buf[i];
     }
-    pl[0] = pl0;
-    pl[1] = pl1;
-    len[0] = len0;
-    len[1] = len1;
 
-    pkt_len = opus_build_pkt(pkt, pl0, len0, pl1, len1, ext);
+    pkt_len = opus_build_pkt(pkt, pl, len, cnt, ext_frame);
     ts.u64 = 0;
 
     PJ_TEST_SUCCESS(pjmedia_codec_parse(codec, pkt, pkt_len, &ts,
                                         &frame_cnt, frames),
-                    ext ? "extension on frame 1" : "no extension",
+                    ext_frame >= 0 ? "with extension" : "no extension",
                     return -10);
-    PJ_TEST_EQ(frame_cnt, 2, NULL, return -20);
-    PJ_TEST_EQ(frames[0].bit_info, 0, NULL, return -30);
+    PJ_TEST_EQ(frame_cnt, cnt, NULL, return -20);
 
-    for (i = 0; i < 2; ++i) {
+    for (i = 0; i < cnt; ++i) {
         const pj_uint8_t *out = (const pj_uint8_t*)frames[i].buf;
 
-        PJ_TEST_EQ(frames[i].size, 1 + len[i], NULL, return -40);
+        PJ_TEST_EQ(frames[i].size, 1 + len[i], NULL, return -30);
+        PJ_TEST_EQ(frames[i].timestamp.u64, i * samples_per_frame, NULL,
+                   return -40);
         PJ_TEST_EQ(out[0], OPUS_TOC_CODE0, NULL, return -50);
         PJ_TEST_EQ(pj_memcmp(out + 1, pl[i], len[i]), 0, NULL,
                    return -60);
@@ -721,7 +726,10 @@ int codec_opus_parse_test(void)
     pjmedia_codec *codec = NULL;
     pj_pool_t *pool = NULL;
     pj_str_t codec_id = pj_str("opus/48000");
-    unsigned count = 1;
+    static const unsigned len_empty0[] = {0, 58};
+    static const unsigned len_two[] = {20, 30};
+    static const unsigned len_three[] = {20, 30, 40};
+    unsigned count = 1, spf;
     int rc = 0;
 
     PJ_TEST_SUCCESS(pjmedia_endpt_create2(mem, NULL, 0, &endpt), NULL,
@@ -746,11 +754,14 @@ int codec_opus_parse_test(void)
     PJ_TEST_SUCCESS(pjmedia_codec_open(codec, &param), NULL,
                     {rc = -8; goto on_return;});
 
-    rc = opus_check_parse(codec, 0, 58, PJ_TRUE);
+    spf = param.info.clock_rate / 50;
+    rc = opus_check_parse(codec, spf, 2, len_empty0, 1);
     if (rc == 0)
-        rc = opus_check_parse(codec, 20, 30, PJ_TRUE);
+        rc = opus_check_parse(codec, spf, 2, len_two, 1);
     if (rc == 0)
-        rc = opus_check_parse(codec, 20, 30, PJ_FALSE);
+        rc = opus_check_parse(codec, spf, 3, len_three, 2);
+    if (rc == 0)
+        rc = opus_check_parse(codec, spf, 2, len_two, -1);
 
     pjmedia_codec_close(codec);
 
