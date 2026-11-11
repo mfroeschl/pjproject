@@ -648,7 +648,7 @@ static void opus_seed_fmtp(pjmedia_codec_param *param, const char *names[],
 
     for (i = 0; i < cnt; ++i) {
         param->setting.dec_fmtp.param[i].name = pj_str((char*)names[i]);
-        param->setting.dec_fmtp.param[i].val = pj_str("1");
+        param->setting.dec_fmtp.param[i].val = pj_str((char*)names[i]);
     }
     param->setting.dec_fmtp.cnt = (pj_uint8_t)cnt;
 }
@@ -692,6 +692,8 @@ int codec_opus_fmtp_test(void)
         "useinbandfec", "cbr", "usedtx", "x-test"
     };
     static const char *exp_mid[] = { "useinbandfec", "usedtx", "x-test" };
+    static const char *seed_dup[] = { "cbr", "cbr", "usedtx" };
+    static const char *exp_dup[] = { "usedtx", "useinbandfec" };
     static const char *exp_16k[] = {
         "maxplaybackrate", "sprop-maxcapturerate", "useinbandfec", "usedtx"
     };
@@ -702,6 +704,7 @@ int codec_opus_fmtp_test(void)
     pjmedia_codec_opus_config def_cfg, cfg;
     pjmedia_codec_param def_param, param;
     pj_str_t codec_id = pj_str("opus/48000");
+    pj_str_t xtest_str = pj_str("x-test");
     unsigned count = 1;
     int rc = 0;
 
@@ -739,6 +742,15 @@ int codec_opus_fmtp_test(void)
     opus_seed_fmtp(&param, seed_mid, PJ_ARRAY_SIZE(seed_mid));
     rc = opus_check_fmtp(mgr, info, &cfg, &param, exp_mid,
                          PJ_ARRAY_SIZE(exp_mid));
+    if (rc != 0)
+        goto on_restore;
+    /* generate_fmtp() leaves the value of an unrelated entry alone */
+    PJ_TEST_STREQ((&param.setting.dec_fmtp.param[2].val), (&xtest_str), NULL,
+                  {rc = -140; goto on_restore;});
+
+    opus_seed_fmtp(&param, seed_dup, PJ_ARRAY_SIZE(seed_dup));
+    rc = opus_check_fmtp(mgr, info, &cfg, &param, exp_dup,
+                         PJ_ARRAY_SIZE(exp_dup));
     if (rc != 0)
         goto on_restore;
 

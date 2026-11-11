@@ -315,6 +315,7 @@ static void remove_fmtp(pjmedia_codec_fmtp *fmtp, pj_str_t *name)
                 fmtp->param[j].name = fmtp->param[j+1].name;
                 fmtp->param[j].val = fmtp->param[j+1].val;
             }
+            i--;
         }
     }
 }
