@@ -641,8 +641,9 @@ int codec_test_vectors(void)
 }
 
 #if PJMEDIA_HAS_OPUS_CODEC
-/* Opus TOC: config 31 (CELT FB 20 ms), mono */
-#define OPUS_TOC_CODE0  0xF8
+#include <opus/opus.h>
+
+/* Opus TOC: config 31 (CELT FB 20 ms), mono, code 3 */
 #define OPUS_TOC_CODE3  0xFB
 
 #define OPUS_MAX_TEST_FRAMES    3
@@ -705,14 +706,17 @@ static int opus_check_parse(pjmedia_codec *codec, unsigned samples_per_frame,
     PJ_TEST_EQ(frame_cnt, cnt, NULL, return -20);
 
     for (i = 0; i < cnt; ++i) {
-        const pj_uint8_t *out = (const pj_uint8_t*)frames[i].buf;
+        const unsigned char *fr[48];
+        opus_int16 fsize[48];
+        unsigned char toc;
 
-        PJ_TEST_EQ(frames[i].size, 1 + len[i], NULL, return -30);
+        PJ_TEST_EQ(opus_packet_parse((const unsigned char*)frames[i].buf,
+                                     (opus_int32)frames[i].size, &toc, fr,
+                                     fsize, NULL), 1, NULL, return -30);
+        PJ_TEST_EQ(fsize[0], len[i], NULL, return -40);
         PJ_TEST_EQ(frames[i].timestamp.u64, i * samples_per_frame, NULL,
-                   return -40);
-        PJ_TEST_EQ(out[0], OPUS_TOC_CODE0, NULL, return -50);
-        PJ_TEST_EQ(pj_memcmp(out + 1, pl[i], len[i]), 0, NULL,
-                   return -60);
+                   return -50);
+        PJ_TEST_EQ(pj_memcmp(fr[0], pl[i], len[i]), 0, NULL, return -60);
     }
     return 0;
 }
